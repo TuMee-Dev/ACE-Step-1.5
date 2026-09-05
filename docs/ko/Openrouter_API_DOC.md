@@ -653,4 +653,4 @@ curl -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | LLM 모델 경로 |
 | `ACESTEP_LM_BACKEND` | `vllm` | LLM 추론 백엔드 |
 | `ACESTEP_QUEUE_MAXSIZE` | `200` | 작업 큐 최대 용량 |
-| `ACESTEP_GENERATION_TIMEOUT` | `600` | 비스트리밍 요청 타임아웃(초) |
+| `ACESTEP_GENERATION_TIMEOUT` | 설정 안 함(비활성화) | 선택적 전체 하드 타임아웃. 양의 초 값으로 활성화하며, 별도의 15분 무진행 감시기는 항상 작동 |

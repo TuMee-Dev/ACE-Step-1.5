@@ -653,4 +653,4 @@ curl -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | LLM 模型路径 |
 | `ACESTEP_LM_BACKEND` | `vllm` | LLM 推理后端 |
 | `ACESTEP_QUEUE_MAXSIZE` | `200` | 任务队列最大容量 |
-| `ACESTEP_GENERATION_TIMEOUT` | `600` | 非流式请求超时（秒） |
+| `ACESTEP_GENERATION_TIMEOUT` | 未设置（禁用） | 可选的全程硬超时；设置为正秒数后启用。独立的 15 分钟无进度监视始终生效 |

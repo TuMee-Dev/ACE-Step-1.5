@@ -20,7 +20,7 @@ import os
 import re
 import tempfile
 import time
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -41,9 +41,153 @@ from acestep.openrouter_models import (
 
 MODEL_PREFIX = "acestep"
 DEFAULT_AUDIO_FORMAT = "mp3"
+_NO_PROGRESS_TIMEOUT_SECONDS = 15 * 60
+_PROGRESS_WATCH_INTERVAL_SECONDS = 2.0
 
-# Generation timeout for non-streaming requests (seconds)
-GENERATION_TIMEOUT = int(os.environ.get("ACESTEP_GENERATION_TIMEOUT", "600"))
+
+def _generation_timeout_seconds(raw: Optional[str]) -> Optional[float]:
+    """Resolve an opt-in overall emergency deadline for OpenRouter requests."""
+    try:
+        value = float((raw or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+# Progress/activity watchdogs own normal stall detection. A fixed default here would
+# reject a healthy request even though its queued GPU work is still advancing.
+GENERATION_TIMEOUT = _generation_timeout_seconds(os.environ.get("ACESTEP_GENERATION_TIMEOUT"))
+
+
+class _GenerationWaitTimeout(TimeoutError):
+    """A generation stopped making progress or exceeded an operator deadline."""
+
+
+def _timeout_label(seconds: float) -> str:
+    """Return a compact human-readable timeout for client errors."""
+    if seconds >= 60 and seconds % 60 == 0:
+        minutes = int(seconds / 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{seconds:g} seconds"
+
+
+class _GenerationProgressWatchdog:
+    """Track meaningful record changes independently of heartbeat timestamps."""
+
+    def __init__(
+        self,
+        rec: Any,
+        *,
+        inactivity_timeout: float,
+        hard_timeout: Optional[float],
+        poll_interval: float,
+        clock: Callable[[], float],
+    ) -> None:
+        now = clock()
+        self._clock = clock
+        self._started_at = now
+        self._last_activity_at = now
+        self._inactivity_timeout = inactivity_timeout
+        self._hard_timeout = hard_timeout
+        self._poll_interval = poll_interval
+        self._status = str(getattr(rec, "status", "") or "")
+        self._stage = str(getattr(rec, "stage", "") or "")
+        self._progress = self._progress_percent(rec)
+
+    @staticmethod
+    def _progress_percent(rec: Any) -> int:
+        """Normalize stored fractional progress to a stable integer percentage."""
+        try:
+            value = float(getattr(rec, "progress", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if -1.0 <= value <= 1.0:
+            value *= 100.0
+        return int(round(value))
+
+    def next_wait(self, rec: Any) -> float:
+        """Observe progress and return the next bounded wait interval."""
+        now = self._clock()
+        status = str(getattr(rec, "status", "") or "")
+        stage = str(getattr(rec, "stage", "") or "")
+        progress = self._progress_percent(rec)
+
+        status_changed = status != self._status
+        stage_changed = stage != self._stage
+        progress_advanced = progress > self._progress
+        if status_changed or stage_changed or progress_advanced:
+            self._last_activity_at = now
+            self._status = status
+            self._stage = stage
+            # A new phase may legitimately reset its percentage baseline.
+            if status_changed or stage_changed:
+                self._progress = progress
+            elif progress_advanced:
+                self._progress = progress
+
+        if self._hard_timeout is not None:
+            hard_remaining = self._hard_timeout - (now - self._started_at)
+            if hard_remaining <= 0:
+                raise _GenerationWaitTimeout(
+                    "Music generation timed out after the configured "
+                    f"{_timeout_label(self._hard_timeout)} hard limit"
+                )
+        else:
+            hard_remaining = float("inf")
+
+        inactivity_remaining = self._inactivity_timeout - (now - self._last_activity_at)
+        if inactivity_remaining <= 0:
+            raise _GenerationWaitTimeout(
+                "Music generation stalled (no status, stage, or progress change for "
+                f"{_timeout_label(self._inactivity_timeout)})"
+            )
+        return max(
+            0.001,
+            min(self._poll_interval, inactivity_remaining, hard_remaining),
+        )
+
+
+async def _event_wait_once(done_event: asyncio.Event, timeout: float) -> bool:
+    """Return whether an event completed within one watchdog interval."""
+    try:
+        await asyncio.wait_for(done_event.wait(), timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+async def _queue_wait_once(queue: asyncio.Queue, timeout: float) -> Optional[Dict[str, Any]]:
+    """Return one progress message, or ``None`` at the heartbeat interval."""
+    try:
+        return await asyncio.wait_for(queue.get(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
+
+
+async def _wait_for_generation(
+    rec: Any,
+    hard_timeout: Optional[float],
+    *,
+    inactivity_timeout: float = _NO_PROGRESS_TIMEOUT_SECONDS,
+    poll_interval: float = _PROGRESS_WATCH_INTERVAL_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    wait_once: Optional[Callable[[asyncio.Event, float], Awaitable[bool]]] = None,
+) -> None:
+    """Wait until done, failing after 15 minutes without meaningful progress."""
+    done_event = getattr(rec, "done_event", None)
+    if done_event is None:
+        raise RuntimeError("generation record has no completion event")
+    watchdog = _GenerationProgressWatchdog(
+        rec,
+        inactivity_timeout=inactivity_timeout,
+        hard_timeout=hard_timeout,
+        poll_interval=poll_interval,
+        clock=clock,
+    )
+    wait = wait_once or _event_wait_once
+    while not done_event.is_set():
+        if await wait(done_event, watchdog.next_wait(rec)):
+            return
 
 
 # =============================================================================
@@ -474,12 +618,21 @@ async def _openrouter_stream_generator(
     rec: Any,
     model_id: str,
     audio_format: str,
+    *,
+    inactivity_timeout: float = _NO_PROGRESS_TIMEOUT_SECONDS,
+    hard_timeout: Optional[float] = GENERATION_TIMEOUT,
+    poll_interval: float = _PROGRESS_WATCH_INTERVAL_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    queue_wait: Optional[
+        Callable[[asyncio.Queue, float], Awaitable[Optional[Dict[str, Any]]]]
+    ] = None,
 ):
     """
     SSE stream generator that reads from rec.progress_queue.
 
-    Yields heartbeat chunks every 2 seconds while waiting for the
-    queue worker to push the generation result.
+    Yields heartbeat chunks while waiting for the queue worker to push the
+    generation result. Heartbeats do not count as progress: the stream fails
+    after 15 minutes without a status, stage, or percentage advance.
     """
     completion_id = _generate_completion_id()
     created_timestamp = int(time.time())
@@ -516,10 +669,25 @@ async def _openrouter_stream_generator(
     await asyncio.sleep(0)
 
     # Wait for result with periodic heartbeats
+    watchdog = _GenerationProgressWatchdog(
+        rec,
+        inactivity_timeout=inactivity_timeout,
+        hard_timeout=hard_timeout,
+        poll_interval=poll_interval,
+        clock=clock,
+    )
+    wait = queue_wait or _queue_wait_once
     while True:
         try:
-            msg = await asyncio.wait_for(rec.progress_queue.get(), timeout=2.0)
-        except asyncio.TimeoutError:
+            wait_seconds = watchdog.next_wait(rec)
+        except _GenerationWaitTimeout as exc:
+            yield _make_chunk(content=f"\n\nError: {exc}")
+            yield _make_chunk(finish_reason="error")
+            yield "data: [DONE]\n\n"
+            return
+
+        msg = await wait(rec.progress_queue, wait_seconds)
+        if msg is None:
             yield _make_chunk(content=".")
             await asyncio.sleep(0)
             continue
@@ -804,11 +972,13 @@ def create_openrouter_router(app_state_getter) -> APIRouter:
 
             await job_queue.put((rec.job_id, gen_request))
 
-            # Wait for completion with timeout
+            # Wait for completion. The normal path has no wall-clock ceiling; operators
+            # can opt into an additional emergency deadline with the environment setting.
+            # Independently, unchanged status/stage/progress fails after 15 minutes.
             try:
-                await asyncio.wait_for(rec.done_event.wait(), timeout=GENERATION_TIMEOUT)
-            except asyncio.TimeoutError:
-                raise HTTPException(status_code=504, detail="Generation timeout")
+                await _wait_for_generation(rec, GENERATION_TIMEOUT)
+            except _GenerationWaitTimeout as exc:
+                raise HTTPException(status_code=504, detail=str(exc)) from exc
 
             return _build_openrouter_response(rec, req.model, audio_format)
 

@@ -1,8 +1,13 @@
 """Unit tests for ``generate_music`` execution helper mixin."""
 
 import unittest
+from unittest import mock
 
-from acestep.core.generation.handler.generate_music_execute import GenerateMusicExecuteMixin
+from acestep.core.generation.handler import generate_music_execute as execute_module
+from acestep.core.generation.handler.generate_music_execute import (
+    GenerateMusicExecuteMixin,
+    _generation_timeout_seconds,
+)
 
 
 class _Host(GenerateMusicExecuteMixin):
@@ -49,6 +54,15 @@ class _Host(GenerateMusicExecuteMixin):
 class GenerateMusicExecuteMixinTests(unittest.TestCase):
     """Verify progress lifecycle and service forwarding behavior."""
 
+    def test_wall_clock_timeout_is_opt_in(self):
+        """Unset/invalid values must not impose the old ten-minute ceiling."""
+        self.assertIsNone(_generation_timeout_seconds(None))
+        self.assertIsNone(_generation_timeout_seconds(""))
+        self.assertIsNone(_generation_timeout_seconds("invalid"))
+        self.assertIsNone(_generation_timeout_seconds("0"))
+        self.assertIsNone(_generation_timeout_seconds("-1"))
+        self.assertEqual(_generation_timeout_seconds("900"), 900.0)
+
     def test_run_service_with_progress_invokes_service_and_stops_estimator(self):
         """Helper should call service once and always stop progress estimator."""
         host = _Host()
@@ -85,6 +99,61 @@ class GenerateMusicExecuteMixinTests(unittest.TestCase):
         self.assertTrue(host.stopped)
         self.assertEqual(host.service_calls, 1)
         self.assertEqual(out["outputs"]["target_latents"], "ok")
+
+    def test_default_execution_joins_without_a_deadline(self):
+        """The service thread should wait indefinitely when no override is configured."""
+        joins = []
+        real_thread = execute_module.threading.Thread
+
+        class _Thread:
+            def __init__(self, *args, **kwargs):
+                self._inner = real_thread(*args, **kwargs)
+
+            def start(self):
+                self._inner.start()
+
+            def join(self, timeout=None):
+                joins.append(timeout)
+                self._inner.join(timeout=timeout)
+
+            def is_alive(self):
+                return self._inner.is_alive()
+
+        host = _Host()
+        with mock.patch.object(execute_module, "_GENERATION_TIMEOUT", None), mock.patch.object(
+            execute_module.threading, "Thread", _Thread
+        ):
+            host._run_generate_music_service_with_progress(
+                progress=lambda *args, **kwargs: None,
+                actual_batch_size=1,
+                audio_duration=600.0,
+                inference_steps=8,
+                timesteps=None,
+                service_inputs={
+                    "captions_batch": ["c"],
+                    "lyrics_batch": ["l"],
+                    "metas_batch": ["m"],
+                    "vocal_languages_batch": ["en"],
+                    "target_wavs_tensor": None,
+                    "repainting_start_batch": [0.0],
+                    "repainting_end_batch": [1.0],
+                    "instructions_batch": ["i"],
+                    "audio_code_hints_batch": None,
+                    "should_return_intermediate": True,
+                },
+                refer_audios=None,
+                guidance_scale=7.0,
+                actual_seed_list=[1],
+                audio_cover_strength=1.0,
+                cover_noise_strength=0.0,
+                use_adg=False,
+                cfg_interval_start=0.0,
+                cfg_interval_end=1.0,
+                shift=1.0,
+                infer_method="ode",
+            )
+
+        self.assertIn(None, joins)
 
 
 if __name__ == "__main__":

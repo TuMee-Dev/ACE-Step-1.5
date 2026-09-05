@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
 from typing import Any, Callable
 
 from acestep.api.job_analysis_runtime import maybe_handle_analysis_only_modes
@@ -15,6 +14,34 @@ from acestep.api.job_llm_preparation import (
 from acestep.api.job_runtime_state import update_progress_job_cache
 from acestep.api.job_result_payload import build_generation_success_response
 from acestep.api.job_generation_setup import build_generation_setup
+
+
+class _MeaningfulProgressTracker:
+    """Gate cache activity to stage changes and whole-percent advances."""
+
+    def __init__(self) -> None:
+        self._percent = -1
+        self._stage = ""
+
+    def observe(self, value: float, desc: str = "") -> tuple[bool, float, str]:
+        """Normalize an update and report whether it proves forward activity."""
+        try:
+            value_f = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            value_f = 0.0
+        stage = desc or self._stage or "running"
+        percent = int(round(value_f * 100.0))
+        stage_changed = stage != self._stage
+        progress_advanced = percent > self._percent
+        meaningful = stage_changed or progress_advanced
+        if meaningful:
+            self._stage = stage
+            # A real stage transition may restart the stage-local percentage.
+            if stage_changed:
+                self._percent = percent
+            elif progress_advanced:
+                self._percent = percent
+        return meaningful, value_f, stage
 
 
 def run_blocking_generate(
@@ -129,23 +156,11 @@ def run_blocking_generate(
     llm_is_initialized = getattr(app_state, "_llm_initialized", False)
     llm_to_pass = llm_handler if llm_is_initialized else None
 
-    last_progress = {"value": -1.0, "time": 0.0, "stage": ""}
+    progress_tracker = _MeaningfulProgressTracker()
 
     def _progress_cb(value: float, desc: str = "") -> None:
-        now = time.time()
-        try:
-            value_f = max(0.0, min(1.0, float(value)))
-        except Exception:
-            value_f = 0.0
-        stage = desc or last_progress["stage"] or "running"
-        if (
-            value_f - last_progress["value"] >= 0.01
-            or stage != last_progress["stage"]
-            or (now - last_progress["time"]) >= 0.5
-        ):
-            last_progress["value"] = value_f
-            last_progress["time"] = now
-            last_progress["stage"] = stage
+        meaningful, value_f, stage = progress_tracker.observe(value, desc)
+        if meaningful:
             store.update_progress(job_id, value_f, stage=stage)
             update_progress_job_cache(
                 app_state=app_state,

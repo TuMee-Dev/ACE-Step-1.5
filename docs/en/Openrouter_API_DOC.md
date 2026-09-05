@@ -653,4 +653,4 @@ The following environment variables can be used to configure the server (for ope
 | `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | LLM model path |
 | `ACESTEP_LM_BACKEND` | `vllm` | LLM inference backend |
 | `ACESTEP_QUEUE_MAXSIZE` | `200` | Task queue max capacity |
-| `ACESTEP_GENERATION_TIMEOUT` | `600` | Non-streaming request timeout (seconds) |
+| `ACESTEP_GENERATION_TIMEOUT` | Unset (disabled) | Optional overall hard timeout; positive seconds opt in. A separate 15-minute no-progress watchdog is always active |

@@ -6,7 +6,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from acestep.api.job_blocking_generation import run_blocking_generate
+from acestep.api.job_blocking_generation import (
+    _MeaningfulProgressTracker,
+    run_blocking_generate,
+)
 
 
 class JobBlockingGenerationTests(unittest.TestCase):
@@ -14,6 +17,24 @@ class JobBlockingGenerationTests(unittest.TestCase):
 
     def _base_req(self) -> SimpleNamespace:
         return SimpleNamespace(inference_steps=25)
+
+    def test_capped_estimator_heartbeats_do_not_refresh_activity(self) -> None:
+        """Repeated identical values must let query-result's inactivity timer expire."""
+        tracker = _MeaningfulProgressTracker()
+        first = tracker.observe(0.78973, "Generating music")
+        repeats = [tracker.observe(0.78973, "Generating music") for _ in range(20)]
+
+        self.assertTrue(first[0])
+        self.assertTrue(all(not update[0] for update in repeats))
+
+    def test_whole_percent_and_stage_changes_are_meaningful(self) -> None:
+        tracker = _MeaningfulProgressTracker()
+        self.assertTrue(tracker.observe(0.520, "diffusion")[0])
+        self.assertFalse(tracker.observe(0.524, "diffusion")[0])
+        self.assertTrue(tracker.observe(0.526, "diffusion")[0])
+        # A new stage is activity even when its percentage restarts.
+        self.assertTrue(tracker.observe(0.010, "decoding")[0])
+        self.assertFalse(tracker.observe(0.014, "decoding")[0])
 
     def test_run_blocking_generate_success_path_updates_progress_and_builds_payload(self) -> None:
         """Helper should preserve progress/cache update flow and success payload assembly."""
@@ -25,6 +46,7 @@ class JobBlockingGenerationTests(unittest.TestCase):
         selected_handler = SimpleNamespace(device="cuda")
         prepared = SimpleNamespace(
             caption="cap",
+            global_caption="global cap",
             lyrics="lyr",
             bpm=120,
             key_scale="C major",
@@ -47,7 +69,10 @@ class JobBlockingGenerationTests(unittest.TestCase):
         generation_result = SimpleNamespace(success=True, audios=[{"audio_path": "a.wav"}])
 
         def _run_generation_side_effect(**kwargs):
-            kwargs["progress_cb"](0.5, "generating")
+            # The estimator may keep reporting its capped value every 0.5s. Only the
+            # first report may refresh store/cache activity.
+            for _ in range(5):
+                kwargs["progress_cb"](0.5, "generating")
             return generation_result
 
         with patch("acestep.api.job_blocking_generation.prepare_llm_generation_inputs", return_value=prepared), \
@@ -105,6 +130,7 @@ class JobBlockingGenerationTests(unittest.TestCase):
         selected_handler = SimpleNamespace(device="cuda")
         prepared = SimpleNamespace(
             caption="cap",
+            global_caption="global cap",
             lyrics="lyr",
             bpm=None,
             key_scale="",

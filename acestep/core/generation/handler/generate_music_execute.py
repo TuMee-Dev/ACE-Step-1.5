@@ -6,10 +6,23 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from loguru import logger
 
-# Maximum wall-clock seconds to wait for service_generate before declaring a hang.
-# Generous default: most generations finish in 30-120s, but large batches on slow
-# GPUs can take several minutes.  Override via ACESTEP_GENERATION_TIMEOUT env var.
-_DEFAULT_GENERATION_TIMEOUT = int(os.environ.get("ACESTEP_GENERATION_TIMEOUT", "600"))
+
+def _generation_timeout_seconds(raw: Optional[str]) -> Optional[float]:
+    """Resolve the optional emergency wall-clock timeout.
+
+    Generation progress is monitored by the API and its callers, so a fixed default
+    deadline incorrectly kills healthy long tracks.  Operators can still opt into a
+    hard ceiling with ``ACESTEP_GENERATION_TIMEOUT``; blank, invalid, zero, and negative
+    values leave it disabled.
+    """
+    try:
+        value = float((raw or "").strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+_GENERATION_TIMEOUT = _generation_timeout_seconds(os.environ.get("ACESTEP_GENERATION_TIMEOUT"))
 
 
 class GenerateMusicExecuteMixin:
@@ -56,9 +69,10 @@ class GenerateMusicExecuteMixin:
     ) -> Dict[str, Any]:
         """Invoke ``service_generate`` while maintaining background progress estimation.
 
-        Wraps the synchronous CUDA call in a monitored thread so that a hung
-        diffusion loop becomes a recoverable ``TimeoutError`` instead of a
-        permanent UI freeze.
+        Wraps the synchronous CUDA call in a monitored thread.  By default there is no
+        wall-clock ceiling: the API's activity watchdog is responsible for detecting a
+        stalled task.  Deployments that need an additional emergency deadline can set
+        ``ACESTEP_GENERATION_TIMEOUT`` to a positive number of seconds.
         """
         infer_steps_for_progress = len(timesteps) if timesteps else inference_steps
         progress_desc = f"Generating music (batch size: {actual_batch_size})..."
@@ -66,11 +80,10 @@ class GenerateMusicExecuteMixin:
         stop_event = None
         progress_thread = None
 
-        # --- Timeout-wrapped service_generate ---
-        # Run the actual CUDA work in a child thread so we can join() with a
-        # deadline.  If it exceeds the timeout the calling thread unblocks and
-        # raises TimeoutError, which propagates to generate_music()'s
-        # try/except and becomes a clean error payload for the UI.
+        # Run the actual CUDA work in a child thread so an explicitly configured
+        # emergency timeout can unblock the request.  With the normal ``None`` timeout,
+        # join waits for completion while the progress-estimator thread continues to
+        # publish activity for the API watchdog.
         _result: Dict[str, Any] = {}
         _error: Dict[str, BaseException] = {}
 
@@ -142,17 +155,17 @@ class GenerateMusicExecuteMixin:
                 daemon=True,
             )
             gen_thread.start()
-            gen_thread.join(timeout=_DEFAULT_GENERATION_TIMEOUT)
+            gen_thread.join(timeout=_GENERATION_TIMEOUT)
 
-            if gen_thread.is_alive():
+            if _GENERATION_TIMEOUT is not None and gen_thread.is_alive():
                 logger.error(
-                    f"[generate_music] service_generate exceeded {_DEFAULT_GENERATION_TIMEOUT}s "
+                    f"[generate_music] service_generate exceeded {_GENERATION_TIMEOUT:g}s "
                     f"timeout (batch={actual_batch_size}, steps={inference_steps}, "
                     f"duration={audio_duration}s).  The CUDA operation may still be "
                     f"running in the background."
                 )
                 raise TimeoutError(
-                    f"Music generation timed out after {_DEFAULT_GENERATION_TIMEOUT} seconds.  "
+                    f"Music generation timed out after {_GENERATION_TIMEOUT:g} seconds.  "
                     f"This usually means the GPU ran out of VRAM or the diffusion loop "
                     f"stalled.  Try reducing batch size, duration, or inference steps."
                 )

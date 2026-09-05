@@ -653,4 +653,4 @@ curl -X POST http://127.0.0.1:8002/v1/chat/completions \
 | `ACESTEP_LM_MODEL_PATH` | `acestep-5Hz-lm-0.6B` | LLM モデルパス |
 | `ACESTEP_LM_BACKEND` | `vllm` | LLM 推論バックエンド |
 | `ACESTEP_QUEUE_MAXSIZE` | `200` | タスクキューの最大容量 |
-| `ACESTEP_GENERATION_TIMEOUT` | `600` | 非ストリーミングリクエストのタイムアウト（秒） |
+| `ACESTEP_GENERATION_TIMEOUT` | 未設定（無効） | 任意の全体ハードタイムアウト。正の秒数で有効化。別の15分間の無進捗監視は常に有効 |

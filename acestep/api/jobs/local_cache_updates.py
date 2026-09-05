@@ -143,13 +143,17 @@ def update_local_cache_progress(
     if not local_cache:
         return
 
-    env, create_time = _get_record_env_and_time(store=store, job_id=job_id, now_fn=now_fn)
+    now = now_fn()
+    env, create_time = _get_record_env_and_time(
+        store=store, job_id=job_id, now_fn=lambda: now,
+    )
     status_int = map_status("running")
     result_data = [{
         "file": "",
         "wave": "",
         "status": status_int,
         "create_time": int(create_time),
+        "update_time": int(now),
         "env": env,
         "progress": float(progress),
         "stage": stage,

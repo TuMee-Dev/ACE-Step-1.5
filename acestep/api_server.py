@@ -110,7 +110,9 @@ def _get_project_root() -> str:
 
 RESULT_KEY_PREFIX = "ace_step_v1.5_"
 RESULT_EXPIRE_SECONDS = 7 * 24 * 60 * 60  # 7 days
-TASK_TIMEOUT_SECONDS = 3600  # 1 hour
+# Fail a cached running task only after this much *inactivity*. Progress cache entries carry
+# an update_time, so a healthy hour-plus render is no longer mislabeled failed at age 1 hour.
+TASK_TIMEOUT_SECONDS = 15 * 60
 JOB_STORE_CLEANUP_INTERVAL = 300  # 5 minutes - interval for cleaning up old jobs
 JOB_STORE_MAX_AGE_SECONDS = 86400  # 24 hours - completed jobs older than this will be cleaned
 
@@ -366,7 +368,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 

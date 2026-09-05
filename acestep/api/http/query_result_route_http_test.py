@@ -95,6 +95,26 @@ class QueryResultRouteHttpTests(unittest.TestCase):
         self.assertIn("timestamp", payload)
         self.assertIsNone(payload["extra"])
 
+    def test_query_result_keeps_old_but_active_cache_entry_running(self):
+        """A render may exceed the age ceiling when its progress record is still active."""
+
+        now = int(time.time())
+        active = json.dumps([{
+            "status": 0,
+            "create_time": now - 7200,
+            "update_time": now,
+            "progress": 0.5,
+            "stage": "generating",
+        }])
+        client = self._build_client(local_cache={"ace_step_v1.5_task-1": active})
+        response = client.post(
+            "/query_result",
+            json={"ai_token": "test-token", "task_id_list": ["task-1"]},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(0, response.json()["data"][0]["status"])
+
     def test_query_result_returns_full_analysis_result_directly(self):
         """POST /query_result should preserve full-analysis payload wrapping contract."""
 

@@ -186,12 +186,14 @@ class LocalCacheUpdatesTests(unittest.TestCase):
             map_status=_map_status,
             result_key_prefix="prefix:",
             result_expire_seconds=600,
+            now_fn=lambda: 450.0,
         )
 
         _, payload, _ = cache.calls[0]
         self.assertEqual(0, payload[0]["status"])
         self.assertEqual(0.25, payload[0]["progress"])
         self.assertEqual("running", payload[0]["stage"])
+        self.assertEqual(450, payload[0]["update_time"])
 
     def test_update_helpers_are_noop_without_local_cache(self):
         """Update helpers should return without writes when local cache backend is absent."""

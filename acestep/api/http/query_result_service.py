@@ -50,7 +50,10 @@ def _build_running_result_payload(
     first_item = data_json[0]
     status = first_item.get("status")
     create_time = first_item.get("create_time", 0)
-    if status == 0 and (current_time - create_time) > task_timeout_seconds:
+    # New cache entries refresh update_time whenever the worker reports activity.  Fall back
+    # to create_time for old entries written before the activity timestamp was introduced.
+    activity_time = first_item.get("update_time", create_time)
+    if status == 0 and (current_time - activity_time) > task_timeout_seconds:
         return {"task_id": task_id, "result": data, "status": 2}
     return {
         "task_id": task_id,
